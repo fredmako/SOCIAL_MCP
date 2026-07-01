@@ -1,12 +1,14 @@
-// src/index.ts
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { serveHttp } from "@modelcontextprotocol/server/http";
 import { z } from "zod";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-// Helper function to get Twitter token from environment
+// ---- Config / env ----
+const PORT = Number(process.env.PORT) || 3000;
+const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET; // required header for any caller
+
 function getFreshTwitterToken(): string {
   const token = process.env.TWITTER_BEARER_TOKEN;
   if (!token) {
@@ -15,9 +17,10 @@ function getFreshTwitterToken(): string {
   return token;
 }
 
-const server = new McpServer({ 
-  name: "social-mcp", 
-  version: "1.0.0" 
+// ---- Server + tools ----
+const server = new McpServer({
+  name: "social-mcp",
+  version: "1.0.0",
 });
 
 server.registerTool(
@@ -36,10 +39,14 @@ server.registerTool(
       },
       body: JSON.stringify({ text }),
     });
-    if (!res.ok) throw new Error(`Twitter API error: ${res.status}`);
-    const data = await res.json() as { data: { id: string } };
+
+    if (!res.ok) {
+      throw new Error(`Twitter API error: ${res.status}`);
+    }
+
+    const data = (await res.json()) as { data: { id: string } };
     return { content: [{ type: "text", text: `Posted: ${data.data.id}` }] };
-  }
+  },
 );
 
 server.registerTool(
@@ -50,46 +57,53 @@ server.registerTool(
   },
   async ({ count }) => {
     const token = getFreshTwitterToken();
-    
-    // First, get the authenticated user's ID
+
+    // Get the authenticated user's ID first
     const userRes = await fetch("https://api.twitter.com/2/users/me", {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { Authorization: `Bearer ${token}` },
     });
-    
+
     if (!userRes.ok) {
       throw new Error(`Twitter API error: ${userRes.status}`);
     }
-    
-    const userData = await userRes.json() as { data: { id: string } };
+
+    const userData = (await userRes.json()) as { data: { id: string } };
     const userId = userData.data.id;
-    
+
     // Fetch recent tweets
     const tweetsRes = await fetch(
       `https://api.twitter.com/2/users/${userId}/tweets?max_results=${count}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${token}` } },
     );
-    
+
     if (!tweetsRes.ok) {
       throw new Error(`Twitter API error: ${tweetsRes.status}`);
     }
-    
-    const tweetsData = await tweetsRes.json() as { data: Array<{ text: string }> };
-    const tweets = tweetsData.data?.map((tweet: { text: string }) => tweet.text).join("\n") || "No tweets found";
-    
+
+    const tweetsData = (await tweetsRes.json()) as {
+      data?: Array<{ text: string }>;
+    };
+    const tweets =
+      tweetsData.data?.map((tweet) => tweet.text).join("\n") ||
+      "No tweets found";
+
     return { content: [{ type: "text", text: tweets }] };
-  }
+  },
 );
 
-// Start the server using stdio transport
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
+// ---- Start server over HTTP, with a shared-secret check ----
+serveHttp(server, {
+  port: PORT,
+  // Rejects any request that doesn't present the correct bearer secret.
+  // Set MCP_SHARED_SECRET in your .env and put the same value in Notion's
+  // custom header field as: Authorization: Bearer <secret>
+  onRequest: (req) => {
+    if (!MCP_SHARED_SECRET) return; // no secret configured, allow (dev only)
+    const auth = req.headers.authorization;
+    if (auth !== `Bearer ${MCP_SHARED_SECRET}`) {
+      throw new Error("Unauthorized: invalid or missing MCP secret");
+    }
+  },
+});
 
-main().catch(console.error);
+console.log(`social-mcp server listening on port ${PORT}`);
