@@ -1,13 +1,14 @@
-import { McpServer } from "@modelcontextprotocol/server";
-import { serveHttp } from "@modelcontextprotocol/server/http";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import dotenv from "dotenv";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 
 dotenv.config();
 
 // ---- Config / env ----
 const PORT = Number(process.env.PORT) || 3000;
-const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET; // required header for any caller
+const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET;
 
 function getFreshTwitterToken(): string {
   const token = process.env.TWITTER_BEARER_TOKEN;
@@ -18,10 +19,12 @@ function getFreshTwitterToken(): string {
 }
 
 // ---- Server + tools ----
-const server = new McpServer({
-  name: "social-mcp",
-  version: "1.0.0",
-});
+const server = new McpServer(
+  { name: "social-mcp", version: "1.0.0" },
+  {
+    capabilities: { tools: {} },
+  }
+);
 
 server.registerTool(
   "post_tweet",
@@ -29,7 +32,7 @@ server.registerTool(
     description: "Post a tweet to X/Twitter on the user's behalf",
     inputSchema: z.object({ text: z.string().max(280) }),
   },
-  async ({ text }) => {
+  async ({ text }: { text: string }) => {
     const token = getFreshTwitterToken();
     const res = await fetch("https://api.twitter.com/2/tweets", {
       method: "POST",
@@ -46,7 +49,7 @@ server.registerTool(
 
     const data = (await res.json()) as { data: { id: string } };
     return { content: [{ type: "text", text: `Posted: ${data.data.id}` }] };
-  },
+  }
 );
 
 server.registerTool(
@@ -55,7 +58,7 @@ server.registerTool(
     description: "Get the user's recent posts from X/Twitter",
     inputSchema: z.object({ count: z.number().min(1).max(20).default(5) }),
   },
-  async ({ count }) => {
+  async ({ count }: { count: number }) => {
     const token = getFreshTwitterToken();
 
     // Get the authenticated user's ID first
@@ -73,7 +76,7 @@ server.registerTool(
     // Fetch recent tweets
     const tweetsRes = await fetch(
       `https://api.twitter.com/2/users/${userId}/tweets?max_results=${count}`,
-      { headers: { Authorization: `Bearer ${token}` } },
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     if (!tweetsRes.ok) {
@@ -88,22 +91,31 @@ server.registerTool(
       "No tweets found";
 
     return { content: [{ type: "text", text: tweets }] };
-  },
+  }
 );
 
-// ---- Start server over HTTP, with a shared-secret check ----
-serveHttp(server, {
-  port: PORT,
-  // Rejects any request that doesn't present the correct bearer secret.
-  // Set MCP_SHARED_SECRET in your .env and put the same value in Notion's
-  // custom header field as: Authorization: Bearer <secret>
-  onRequest: (req) => {
-    if (!MCP_SHARED_SECRET) return; // no secret configured, allow (dev only)
-    const auth = req.headers.authorization;
-    if (auth !== `Bearer ${MCP_SHARED_SECRET}`) {
-      throw new Error("Unauthorized: invalid or missing MCP secret");
-    }
-  },
+// ---- Start server over HTTP with shared-secret check ----
+const transport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: undefined,
 });
 
-console.log(`social-mcp server listening on port ${PORT}`);
+const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  // Shared-secret check
+  if (MCP_SHARED_SECRET) {
+    const auth = req.headers.authorization;
+    if (auth !== `Bearer ${MCP_SHARED_SECRET}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized: invalid or missing MCP secret" }));
+      return;
+    }
+  }
+  await transport.handleRequest(req, res);
+});
+
+(async () => {
+  await server.connect(transport);
+})();
+
+httpServer.listen(PORT, () => {
+  console.log(`social-mcp server listening on port ${PORT}`);
+});
