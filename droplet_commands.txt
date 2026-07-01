@@ -1,0 +1,39 @@
+# COPY THESE COMMANDS AND RUN THEM IN YOUR DIGITALOCEAN DROPLET SSH SESSION
+
+# Step 1: Check if SSH key exists
+echo "Checking for SSH keys..."
+ls -la ~/.ssh/
+
+# Step 2: Generate SSH key if needed
+if [ ! -f ~/.ssh/id_ed25519 ]; then
+    echo "Generating new SSH key..."
+    ssh-keygen -t ed25519 -C "root@$(hostname)" -f ~/.ssh/id_ed25519 -N ""
+fi
+
+# Step 3: Display the public key (COPY THIS ENTIRE LINE)
+echo ""
+echo "========================================="
+echo "COPY THE KEY BELOW AND ADD IT TO GITHUB"
+echo "========================================="
+cat ~/.ssh/id_ed25519.pub
+echo ""
+echo "========================================="
+
+# Step 4: Start SSH agent
+echo "Starting SSH agent..."
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+
+# Step 5: Configure Git to use SSH
+echo "Configuring Git to use SSH..."
+git remote set-url origin git@github.com:fredmako/SOCIAL_MCP.git
+
+# Step 6: Test connection
+echo "Testing SSH connection to GitHub..."
+ssh -T git@github.com
+
+# Step 7: Push changes
+echo "Pushing changes to GitHub..."
+git push origin main
+
+echo "DONE! Your changes have been pushed."
