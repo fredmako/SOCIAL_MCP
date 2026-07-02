@@ -1,7 +1,7 @@
 {
   "name": "social-mcp",
   "version": "1.0.0",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
