@@ -1,0 +1,138 @@
+
+# ------------------------------------------------------------------
+# KNOWLEDGE BASE (file-backed, no extra DB needed)
+# ------------------------------------------------------------------
+KNOWLEDGE_DIR = os.path.join(os.path.dirname(__file__), "knowledge")
+os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
+
+def knowledge_path():
+    return os.path.join(KNOWLEDGE_DIR, "kb.json")
+
+def load_knowledge():
+    p = knowledge_path()
+    if not os.path.exists(p):
+        save_knowledge([])
+        return []
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_knowledge(items):
+    with open(knowledge_path(), "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+
+def search_knowledge(query, top_k=3):
+    items = load_knowledge()
+    if not items:
+        return []
+    q = (query or "").lower().strip()
+    if not q:
+        return items[:top_k]
+    scored = []
+    for it in items:
+        text = " ".join([it.get("title", ""), it.get("content", ""), " ".join(it.get("tags", []))]).lower()
+        score = 0
+        for w in q.split():
+            if w in text:
+                score += 1
+        scored.append((score, it))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [it for score, it in scored if score > 0]
+    return results[:top_k] or []
+
+# ------------------------------------------------------------------
+# KNOWLEDGE CRUD ROUTES
+# ------------------------------------------------------------------
+@app.route("/knowledge", methods=["GET"])
+def list_knowledge():
+    tags = request.args.get("tags")
+    items = load_knowledge()
+    if tags:
+        filter_tags = [t.strip().lower() for t in tags.split(",") if t.strip()]
+        items = [it for it in items if any(t in [x.lower() for x in it.get("tags", [])] for t in filter_tags)]
+    return jsonify({"items": items})
+
+@app.route("/knowledge", methods=["POST"])
+def add_knowledge():
+    data = request.get_json(force=True, silent=True) or {}
+    if not data.get("title") or not data.get("content"):
+        return jsonify({"error": "title and content are required"}), 400
+    items = load_knowledge()
+    entry = {
+        "id": "kb_" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f"),
+        "title": data["title"],
+        "content": data["content"],
+        "tags": data.get("tags", []),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    items.append(entry)
+    save_knowledge(items)
+    return jsonify({"success": True, "item": entry})
+
+# ------------------------------------------------------------------
+# PROMPT BUILDER THAT INJECTS KNOWLEDGE
+# ------------------------------------------------------------------
+def build_prompt_with_knowledge(base_prompt, user_query, top_k=3):
+    snippets = search_knowledge(user_query, top_k=top_k)
+    if not snippets:
+        return base_prompt
+    context_lines = ["KNOWLEDGE BASE REFERENCE (use this to stay accurate about pricing, SOPs, OEM keys, etc.):"]
+    for i, snip in enumerate(snippets, 1):
+        context_lines.append(f"{i}. {snip.get('title','')}: {snip.get('content','')}")
+    context_lines.append("---")
+    context_text = "\n".join(context_lines)
+    return f"{context_text}\n\n{base_prompt}"
+
+# ------------------------------------------------------------------
+# EXISTING /chat and /report handlers need minor edits
+# ------------------------------------------------------------------
+# Example /chat with knowledge
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.get_json(force=True, silent=True) or {}
+    user_message = (data.get("message") or "").strip()
+    if not user_message:
+        return jsonify({"error": "message is required"}), 400
+
+    system_prompt = build_prompt_with_knowledge(
+        base_prompt=(
+            "You are EagleBot, a support assistant for Eagle Tech HMIS. "
+            "Be direct, helpful, and accurate. "
+            "If the user asks about pricing, license keys, SOPs, SOPs, installation steps, "
+            "refer ONLY to the Knowledge Base reference above when present."
+        ),
+        user_query=user_message,
+        top_k=3,
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if data.get("history"):
+        messages.extend(data["history"])
+
+    try:
+        completion = litellm.completion(
+            model="groq/llama-3.1-8b-instant",
+            messages=messages,
+            api_key=os.environ.get("GROQ_API_KEY"),
+        )
+        reply = completion.choices[0].message.content if completion.choices else ""
+        return jsonify({"response": reply})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Example /report with knowledge
+@app.route("/report", methods=["POST"])
+def generate_report():
+    data = request.get_json(force=True, silent=True) or {}
+    mode = data.get("mode", "adhoc")
+    prompt = data.get("prompt", "")
+    if not prompt:
+        return jsonify({"error": "prompt is required"}), 400
+
+    enhanced_prompt = build_prompt_with_knowledge(
+        base_prompt=prompt,
+        user_query=prompt,
+        top_k=3,
+    )
+
+    # ... keep your existing report generation logic ...
+    # Just replace `prompt` with `enhanced_prompt` when calling the LLM.
