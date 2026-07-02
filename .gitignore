@@ -1,6 +1,6 @@
 node_modules
 .env
-dist/
+
 build_errors.txt
 bash.exe.stackdump
 nul
